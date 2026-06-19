@@ -25,17 +25,28 @@ export async function POST(req: Request) {
   }
 
   const u = await pool.query(
-    `SELECT id, password_hash FROM ${SCHEMA}.app_users WHERE email=$1`,
+    `SELECT id, password_salt, password_hash FROM ${SCHEMA}.users WHERE email=$1`,
     [email],
   );
-  if (!u.rows[0] || !verifyPassword(b.password, u.rows[0].password_hash)) {
+  const row = u.rows[0];
+  if (!row || !verifyPassword(b.password, row.password_salt, row.password_hash)) {
     return NextResponse.json({ ok: false, error: 'invalid credentials' }, { status: 401 });
   }
 
   const token = newSessionToken();
-  await createSession(token, u.rows[0].id, ipOf(req), uaOf(req));
+  await createSession(token, row.id, ipOf(req), uaOf(req));
 
-  const res = NextResponse.json({ ok: true, user_id: u.rows[0].id, token });
+  // best-effort login bookkeeping (columns exist on users)
+  pool
+    .query(
+      `UPDATE ${SCHEMA}.users
+         SET last_login_at=NOW(), last_login_ip=$2, login_count=COALESCE(login_count,0)+1
+       WHERE id=$1`,
+      [row.id, ipOf(req)],
+    )
+    .catch(() => {});
+
+  const res = NextResponse.json({ ok: true, user_id: row.id, token });
   res.headers.set('Set-Cookie', cookieString(token));
   return res;
 }

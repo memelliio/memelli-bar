@@ -1,25 +1,25 @@
 import crypto from 'crypto';
 import { pool, SCHEMA } from './db';
 
-// Byte-for-byte compatible with the existing live auth nodes so the same
-// control_store.app_users / app_sessions rows and mio_sess cookies interoperate.
+// Compatible with control_store.users (the real 57-row table) + app_sessions.
+// Password is stored SPLIT across two columns: password_salt + password_hash.
+//   password_salt = randomBytes(16).hex  (32 chars)
+//   password_hash = scryptSync(pw, salt, 32).hex  (64 chars)
 
 export const COOKIE = 'mio_sess';
 export const MAX_AGE = 2592000; // 30 days, seconds
 
-export function hashPassword(pw: string): string {
+export function hashPassword(pw: string): { salt: string; hash: string } {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(pw, salt, 32).toString('hex');
-  return salt + ':' + hash; // matches api_auth_signup
+  return { salt, hash };
 }
 
-export function verifyPassword(pw: string, stored: string): boolean {
-  const parts = (stored || '').split(':');
-  if (parts.length !== 2) return false;
-  const test = crypto.scryptSync(pw, parts[0], 32).toString('hex');
-  // constant-time compare
+export function verifyPassword(pw: string, salt: string, hash: string): boolean {
+  if (!salt || !hash) return false;
+  const test = crypto.scryptSync(pw, salt, 32).toString('hex');
   const a = Buffer.from(test, 'hex');
-  const b = Buffer.from(parts[1], 'hex');
+  const b = Buffer.from(hash, 'hex');
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
@@ -29,7 +29,7 @@ export function newSessionToken(): string {
 }
 
 export function newUserId(): string {
-  return 'usr_' + crypto.randomBytes(12).toString('hex');
+  return crypto.randomUUID(); // users.id is a UUID string
 }
 
 export function cookieString(token: string, maxAge = MAX_AGE): string {
@@ -54,15 +54,15 @@ export type SessionUser = {
   email: string;
   full_name: string | null;
   role: string;
-  plan: string;
+  tier: string | null;
 };
 
 export async function userFromToken(token: string | undefined): Promise<SessionUser | null> {
   if (!token) return null;
   const r = await pool.query(
-    `SELECT s.user_id, u.email, u.full_name, u.role, u.plan
+    `SELECT s.user_id, u.email, u.full_name, u.role, u.tier
        FROM ${SCHEMA}.app_sessions s
-       JOIN ${SCHEMA}.app_users u ON u.id = s.user_id
+       JOIN ${SCHEMA}.users u ON u.id = s.user_id
       WHERE s.token = $1 AND s.revoked_at IS NULL AND s.expires_at > NOW()`,
     [token],
   );
